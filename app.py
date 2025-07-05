@@ -5,12 +5,14 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from const import COLUMNS, INDEX, HIDDEN, DROP, ITEMS, BS, PL, CF, ASSETS, LIABILITITES, NET_ASSETS, PL_ABST, COST_DETAILS, SGA_DETAILS, SGA_DROP
+from const import COLUMNS, INDEX, HIDDEN, DROP, ITEMS, BS, PL, CF, ASSETS, LIABILITITES, NET_ASSETS, PL_ABST, COST_DETAILS, SGA_DETAILS, SGA_DROP, DEFAULT_URL
 
 st.title("不正会計検知AIシステム（内部版）")
 
+
 # セッション状態の初期化
 session_states = {
+    "url":DEFAULT_URL,
     "file":None,
     "df":None,
     "hidden":None,
@@ -26,45 +28,40 @@ for k,v in session_states.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-with st.container(border=True):
 
-    # upload_tab, input_tab, validate_tab = st.tabs(["ファイルアップロード", "画面入力", "APIキー検証"])
-    upload_tab, input_tab = st.tabs(["ファイルアップロード", "画面入力"])
+with st.expander("API 接続先 URL"):
+    st.session_state["url"] = st.text_input("url", value=DEFAULT_URL)
 
-# with validate_tab:
-#     cols = st.columns(2)
-    
-    # with cols[0]:
-    #     user_code = st.text_input("ユーザーコード")
-    # with cols[1]:
-    #     api_key = st.text_input("APIキー", type="password", autocomplete="")
-    # enable_button = bool(user_code.strip()) and bool(api_key.strip())         
-    # # st.session_state["val_ready"] = len(user_code) > 0 & len(api_key) > 0
-    # if st.button("検証", disabled=not enable_button):
-    #     # st.write(f"user_code : {user_code}, api_key : {api_key}")
-    #     url = "https://3geeggzw92.execute-api.ap-northeast-1.amazonaws.com/staging/validate_key"
-    #     params = {"user_code":user_code, "api_key":api_key}
-    #     with st.spinner("サーバーと通信中です。"):
-    #         resp = requests.get(url=url, params=params)
-    #         # st.write(resp.content)
-    #         data = json.loads(resp.content)
-    #     if resp.status_code == 200:
-    #         # st.write(data)
-    #         if data["result"]:
-    #             st.success(data["message"], icon="✅")
-    #         else:
-    #             st.error(data["message"], icon="❌")
+
+def init_data(items, default=0, unit="円"):
+    """ 入力データの初期化"""
+    return pd.DataFrame(dict(map(lambda item:(item, {"value":default,"unit":unit}), items))).T
+
 
 def validate(user_code, api_key):
-    url = "https://3geeggzw92.execute-api.ap-northeast-1.amazonaws.com/staging/validate_key"
+    """ ユーザー名とAPIキーの検証"""
+    url = f"{st.session_state['url']}validate_key"
     params = {"user_code":user_code, "api_key":api_key}
-    resp = requests.get(url=url, params=params)
-    return resp
-    # data = json.loads(resp.content)
-    # return resp.status_code, data
+    return requests.get(url=url, params=params)
 
+
+def infer(record, user_code, api_key,
+          _format="prob", _threshold=0.5):
+    """ 不正会計確率の計算結果の取得"""
+    url = st.session_state["url"] + "/infer_fraud"
+    params = {"format":_format, "threshold":_threshold, "user_code":user_code}
+    headers = {"X-API-KEY":api_key}
+    data = list(map(lambda item:{"name":items[item[0]], "value":item[1]}, record.items()))
+    payload = {"n_items":len(data), "version":ITEMS["versions"][0]["name"], "items":data}
+    return requests.post(url=url, data=json.dumps(payload), params=params, headers=headers)
+
+
+# 入力（タブで分割）
+with st.container(border=True):
+    upload_tab, input_tab = st.tabs(["ファイルアップロード", "画面入力"])
+
+# ファイルアップロード
 with upload_tab:
-
     st.session_state["file"] = st.file_uploader(label="財務情報ファイルを選択して「データ確認」ボタンを押してください。", type=".csv")
 
     def delete_file():
@@ -78,7 +75,6 @@ with upload_tab:
             df = df.drop(columns=HIDDEN + DROP).fillna(0).astype(int)
             st.session_state["df"] = df
             st.session_state["hidden"] = hidden
-            # st.session_state["file"] = None
             delete_file()
         else:
             st.write("ファイル形式が間違っています")
@@ -95,24 +91,13 @@ with upload_tab:
 
         index = dict(zip(INDEX, st.session_state["selected"]))
         hidden = st.session_state["hidden"].loc[st.session_state["selected"]].to_dict()
-    
-        url = "https://3geeggzw92.execute-api.ap-northeast-1.amazonaws.com/staging/infer_fraud"
-        params = {"format":"prob", "threshold":0.5, "user_code":hidden["UID"]}
-        headers = {"X-API-KEY":hidden["APIキー"]}
         with st.spinner("サーバーと通信中です。"):
             items = dict(map(lambda item:(item["ja"], item["en"]), ITEMS["versions"][0]["items"]))
             record = st.session_state["df"].loc[st.session_state["selected"]].to_dict()
-            data = list(map(lambda item:{"name":items[item[0]], "value":item[1]}, record.items()))
-            payload = {"n_items":len(data), "version":ITEMS["versions"][0]["name"], "items":data}
             st.session_state["resp"] = None
-            st.session_state["resp"] = requests.post(url=url, data=json.dumps(payload), params=params, headers=headers)
+            st.session_state["resp"] = infer(record, hidden["UID"], hidden["APIキー"])
 
-
-
-def init_data(items, default=0, unit="円"):
-    return pd.DataFrame(dict(map(lambda item:(item, {"value":default,"unit":unit}), items))).T
-
-
+# 画面入力
 with input_tab:
     cols = st.columns(2)
     
@@ -129,14 +114,12 @@ with input_tab:
                                 )
     value_conf = st.column_config.NumberColumn(
                                     "計上額",
-                                    # width="small",
                                     width=None,
                                     format="localized",
                                     step=1
                                 )
     unit_conf = st.column_config.Column(
                                     "単位",
-                                    # width="small",
                                     width="small",
                                     disabled=True
                                 )
@@ -149,7 +132,6 @@ with input_tab:
             st.write("借方")
             with st.container(height=height+margin):
                 st.write("資産の部")
-                # st.write(BS)
                 assets = st.data_editor(init_data(ASSETS,unit=unit),
                             use_container_width=True,
                             height=height-offsets[0],
@@ -189,7 +171,6 @@ with input_tab:
         with pl_cols[0]:
             with st.container(height=height+margin):
                 st.write("損益計算書")
-                # st.write(PL)
                 pl_abst = st.data_editor(init_data(PL_ABST,unit=unit),
                             use_container_width=True,
                             height=height-offsets[0],
@@ -212,7 +193,6 @@ with input_tab:
             with st.container(height=int(height/2)):
                 st.write("販管費明細")
                 sga_details_cols = list(filter(lambda item:item not in SGA_DROP, SGA_DETAILS))
-                # sga_details = st.data_editor(init_data(SGA_DETAILS,unit=unit),
                 sga_details = st.data_editor(init_data(sga_details_cols,unit=unit),
                             use_container_width=True,
                             height=int(height/2)-offsets[1],
@@ -227,7 +207,6 @@ with input_tab:
         margin = 20
         offsets = (60, 80)
         with st.container(height=height):
-            # st.write("CF")
             cf = st.data_editor(init_data(CF,unit=unit),
                         use_container_width=True,
                         height=int(height)-offsets[0],
@@ -237,17 +216,9 @@ with input_tab:
                             "unit":unit_conf
                         })
     full_df = pd.concat([bs, pl, cf], axis="rows")
-    # full_df = full_df.loc[BS+PL+CF,["value"]].T
     full_df = full_df.loc[:,["value"]].T
     full_df.index = [0]
-    # st.dataframe(full_df,
-    #                 # column_config={
-    #                 #     "_index":item_name_conf,
-    #                 #     "value":value_conf,
-    #                 #     "unit":unit_conf                     
-    #                 # }
-    #              )
-    # if st.button("データ登録"):
+
     st.session_state["input_df"] = full_df
 
     if st.session_state["input_df"] is not None:
@@ -257,21 +228,17 @@ with input_tab:
                 resp = validate(st.session_state["user_code"], st.session_state["api_key"])
             data = json.loads(resp.content)
             if resp.status_code == 200 and data["result"]:
-                url = "https://3geeggzw92.execute-api.ap-northeast-1.amazonaws.com/staging/infer_fraud"
-                params = {"format":"prob", "threshold":0.5, "user_code":st.session_state["user_code"]}
-                headers = {"X-API-KEY":st.session_state["api_key"]}
                 with st.spinner("確率の予測中です。"):
                     items = dict(map(lambda item:(item["ja"], item["en"]), ITEMS["versions"][0]["items"]))
                     record = st.session_state["input_df"].loc[0].to_dict()
-                    data = list(map(lambda item:{"name":items[item[0]], "value":item[1]}, record.items()))
-                    payload = {"n_items":len(data), "version":ITEMS["versions"][0]["name"], "items":data}
                     st.session_state["resp"] = None
-                    st.session_state["resp"] = requests.post(url=url, data=json.dumps(payload), params=params, headers=headers)
+                    st.session_state["resp"] = infer(record, st.session_state["user_code"], st.session_state["api_key"])
             else:
                 st.session_state["resp"] = None
                 resp.status_code = 400
                 st.session_state["resp"] = resp
 
+# 結果の表示（全タブで共通）
 with st.container(border=True):
     st.write("## 結果")
     if st.session_state["resp"] is not None:
