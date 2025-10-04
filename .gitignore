@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+api_spec.yaml
+data/
+
 
 # C extensions
 *.so
