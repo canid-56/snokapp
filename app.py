@@ -4,7 +4,11 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from const import COLUMNS, INDEX, HIDDEN, DROP, ITEMS, BS, PL, CF, ASSETS, LIABILITITES, NET_ASSETS, PL_ABST, COST_DETAILS, SGA_DETAILS, SGA_DROP, DEFAULT_URL
+from const import COLUMNS, INDEX, HIDDEN, DROP, ITEMS, BS, PL, CF, ASSETS, LIABILITITES, NET_ASSETS, PL_ABST, COST_DETAILS, SGA_DETAILS, SGA_DROP, DEFAULT_URL ,DEVELOP_URL ,LATEST_URL,STAGING_URL
+
+st.set_page_config(
+    layout="wide"
+)
 
 st.title("不正会計検知AIシステム（内部版）")
 
@@ -27,7 +31,25 @@ for k, v in session_states.items():
         st.session_state[k] = v
 
 with st.expander("API 接続先 URL"):
-    st.session_state["url"] = st.text_input("url", value=DEFAULT_URL)
+    # 環境選択
+    env_options = {
+        "DEFAULT": DEFAULT_URL,
+        "DEVELOP": DEVELOP_URL,
+        "LATEST": LATEST_URL,
+        "STAGING": STAGING_URL
+    }
+    
+    selected_env = st.selectbox(
+        "環境を選択",
+        options=list(env_options.keys()),
+        index=0,
+        help="使用するAPI環境を選択してください"
+    )
+    
+    st.session_state["url"] = env_options[selected_env]
+    
+    # 現在のURL表示
+    st.code(f"接続先: {st.session_state['url']}")
 
 
 def init_data(items, default=0, unit="円"):
@@ -73,12 +95,15 @@ def infer_multi(records, user_codes, api_keys, _format="prob,level,binary", _thr
         "version": ITEMS["versions"][0]["name"],
         "instances": instances
     }
-    
+
+    with open("./data/sent_payload.json", "w") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
     return requests.post(url=url, data=json.dumps(payload), params=params, headers=headers)
 
 
 # 入力（タブで分割）
-with st.container(border=True):
+with st.container(border=True,width='stretch'):
     upload_tab, input_tab = st.tabs(["ファイルアップロード", "画面入力"])
 
 # ファイルアップロード
@@ -118,9 +143,38 @@ with upload_tab:
             delete_file()
 
     if st.session_state["df"] is not None:
-        with st.expander("表示切り替え", expanded=True):
-            with st.container(height=600):
-                st.dataframe(st.session_state["df"].T)
+        with st.expander("詳細を表示", expanded=True):
+            with st.container(height=500):
+                # データフレームの表示用に加工
+                display_df = st.session_state["df"].T.copy()
+                
+                # ヘッダーを会社名/会社番号/決算期の形式に変更
+                new_columns = []
+                for col in display_df.columns:
+                    if isinstance(col, tuple) and len(col) >= 6:
+                        # タプル形式: (メモ, 企業番号, 企業名, 所在地, 連絡先, 決算期, ...)
+                        company_name = col[2]  # 企業名
+                        company_code = col[1]  # 企業番号
+                        period = col[5]  # 決算期
+                        new_header = f"{period}/{company_name}/{company_code}"
+                        new_columns.append(new_header)
+                    else:
+                        new_columns.append(str(col))
+                
+                display_df.columns = new_columns
+                
+                # カラム幅の設定とデータフレーム表示
+                st.dataframe(
+                    display_df,
+                    width='stretch',  # コンテナ幅を最大限活用
+                    height=450,  # コンテナ内での高さ調整
+                    column_config={
+                        col: st.column_config.Column(
+                            width="medium",  # カラム幅を適切に設定
+                            help=f"企業: {col}"
+                        ) for col in display_df.columns
+                    }
+                )
         
         # セレクトボックス用の選択肢を作成（決算期：企業番号：企業名）
         options = []
@@ -129,7 +183,7 @@ with upload_tab:
         for idx in st.session_state["df"].index:
             if isinstance(idx, tuple) and len(idx) >= 7:
                 # タプル形式のインデックス: (メモ, 企業番号, 企業名, 所在地, 連絡先, 決算期, 入力単位, 処理年度)
-                display_text = f"{idx[5]}：{idx[1]}：{idx[2]}"  # 決算期：企業番号：企業名
+                display_text = f"{idx[5]}：{idx[2]}：{idx[1]}"  # 決算期：企業番号：企業名
                 options.append(display_text)
                 option_mapping[display_text] = idx
             else:
@@ -138,14 +192,37 @@ with upload_tab:
                 options.append(display_text)
                 option_mapping[display_text] = idx
         
+        # 全て選択機能のチェックボックス
+        select_all = st.checkbox("全て選択", help="すべての企業決算期を一括選択します")
+        
         # 複数選択に変更
-        selected_display = st.multiselect(
-            "確率を計算する企業決算期を選んで「予測」ボタンを押してください（複数選択可）",
-            options,
-            help="複数の決算期を選択することで、一度に複数企業の不正会計確率を計算できます。")
+        if select_all:
+            # 全て選択された場合
+            selected_display = st.multiselect(
+                "確率を計算する企業決算期を選んで「予測」ボタンを押してください（複数選択可）",
+                options,
+                default=options,  # 全ての選択肢をデフォルトで選択
+                help="複数の決算期を選択することで、一度に複数企業の不正会計確率を計算できます。")
+        else:
+            # 通常の選択
+            selected_display = st.multiselect(
+                "確率を計算する企業決算期を選んで「予測」ボタンを押してください（複数選択可）",
+                options,
+                help="複数の決算期を選択することで、一度に複数企業の不正会計確率を計算できます。")
         
         # 表示名から元のインデックスに変換
         st.session_state["selected"] = [option_mapping[display] for display in selected_display]
+
+        # 閾値選択
+        threshold = st.slider(
+            "不正判定の閾値を選択してください", 
+            min_value=0.0, 
+            max_value=1.0, 
+            value=0.5, 
+            step=0.01,
+            format="%.2f",
+            help="この値以上の不正確率の場合に「不正判定: 有」となります"
+        )
 
     if st.button("予測", disabled=not st.session_state["selected"], 
               help="予測対象の決算期を選んでからクリックしてください。"):
@@ -170,13 +247,15 @@ with upload_tab:
                 st.session_state["resp"] = infer_single(
                     selected_records[0], 
                     user_codes[0], 
-                    api_keys[0]
+                    api_keys[0],
+                    _threshold=threshold
                 )
             else:
                 st.session_state["resp"] = infer_multi(
                     selected_records, 
                     user_codes,
-                    api_keys
+                    api_keys,
+                    _threshold=threshold
                 )
 
 # 画面入力
@@ -215,7 +294,7 @@ with input_tab:
             with st.container(height=height+margin):
                 st.write("資産の部")
                 assets = st.data_editor(init_data(ASSETS,unit=unit),
-                            use_container_width=True,
+                            width='stretch',
                             height=height-offsets[0],
                             column_config={
                                 "_index": item_name_conf,
@@ -227,7 +306,7 @@ with input_tab:
             with st.container(height=int(height/2)):
                 st.write("負債の部")
                 liabilities = st.data_editor(init_data(LIABILITITES,unit=unit),
-                            use_container_width=True,
+                            width='stretch',
                             height=int(height/2)-offsets[1],
                             column_config={
                                 "_index": item_name_conf,
@@ -237,7 +316,7 @@ with input_tab:
             with st.container(height=int(height/2)):
                 st.write("純資産の部")
                 net_assets = st.data_editor(init_data(NET_ASSETS,unit=unit),
-                            use_container_width=True,
+                            width='stretch',
                             height=int(height/2)-offsets[1],
                             column_config={
                                 "_index": item_name_conf,
@@ -254,7 +333,7 @@ with input_tab:
             with st.container(height=height+margin):
                 st.write("損益計算書")
                 pl_abst = st.data_editor(init_data(PL_ABST,unit=unit),
-                            use_container_width=True,
+                            width='stretch',
                             height=height-offsets[0],
                             column_config={
                                 "_index": item_name_conf,
@@ -265,7 +344,7 @@ with input_tab:
             with st.container(height=int(height/2)):
                 st.write("原価明細")
                 cost_details = st.data_editor(init_data(COST_DETAILS,unit=unit),
-                            use_container_width=True,
+                            width='stretch',
                             height=int(height/2)-offsets[1],
                             column_config={
                                 "_index": item_name_conf,
@@ -276,7 +355,7 @@ with input_tab:
                 st.write("販管費明細")
                 sga_details_cols = list(filter(lambda item:item not in SGA_DROP, SGA_DETAILS))
                 sga_details = st.data_editor(init_data(sga_details_cols,unit=unit),
-                            use_container_width=True,
+                            width='stretch',
                             height=int(height/2)-offsets[1],
                             column_config={
                                 "_index": item_name_conf,
@@ -290,7 +369,7 @@ with input_tab:
         offsets = (60, 80)
         with st.container(height=height):
             cf = st.data_editor(init_data(CF,unit=unit),
-                        use_container_width=True,
+                        width='stretch',
                         height=int(height)-offsets[0],
                         column_config={
                             "_index": item_name_conf,
@@ -304,6 +383,18 @@ with input_tab:
     st.session_state["input_df"] = full_df
 
     if st.session_state["input_df"] is not None:
+        # 閾値選択
+        input_threshold = st.slider(
+            "不正判定の閾値を選択してください", 
+            min_value=0.0, 
+            max_value=1.0, 
+            value=0.5, 
+            step=0.01,
+            format="%.2f",
+            help="この値以上の不正確率の場合に「不正判定: 有」となります",
+            key="input_threshold"
+        )
+        
         if st.button("送信", disabled=not enable_button, help="データを送信するためには、ユーザーコードとAPIキーを入力してください。"):
 
             with st.spinner("ユーザー情報の認証中です。"):
@@ -317,7 +408,8 @@ with input_tab:
                     st.session_state["resp"] = infer_single(
                         record, 
                         st.session_state["user_code"], 
-                        st.session_state["api_key"]
+                        st.session_state["api_key"],
+                        _threshold=input_threshold
                     )
             else:
                 st.session_state["resp"] = None
@@ -375,7 +467,7 @@ with st.container(border=True):
                     })
                 
                 results_df = pd.DataFrame(results)
-                st.dataframe(results_df, use_container_width=True)
+                st.dataframe(results_df, width='stretch')
                 
                 # 統計情報の表示
                 if len(results) > 1:
